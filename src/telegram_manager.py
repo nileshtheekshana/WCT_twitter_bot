@@ -39,8 +39,8 @@ class TelegramMonitor:
             self.is_running = True
             logger.info(f"Started monitoring Telegram channel: {config.telegram_main_channel_id}")
             
-            # Start polling
-            await self.app.updater.start_polling()
+            # Start polling (v20+ API)
+            await self.app.run_polling()
             
         except Exception as e:
             logger.error(f"Error starting Telegram monitor: {e}")
@@ -51,7 +51,6 @@ class TelegramMonitor:
         """Stop monitoring the Telegram channel"""
         try:
             if self.app and self.is_running:
-                await self.app.updater.stop()
                 await self.app.stop()
                 await self.app.shutdown()
                 self.is_running = False
@@ -114,12 +113,23 @@ class TelegramResponder:
         self.app = None
         self.pending_selections = {}  # Track pending comment selections
         self.pending_fallback_approvals = {}  # Track pending fallback approvals
-        self._initialize_app()
+        self.polling_task = None  # Track the polling task
+        # Don't initialize app in __init__, do it async later
     
-    def _initialize_app(self):
+    async def initialize(self):
+        """Initialize the Telegram application asynchronously"""
+        if self.app is None:
+            await self._initialize_app()
+    
+    async def _initialize_app(self):
         """Initialize the Telegram application"""
         try:
-            self.app = Application.builder().token(config.telegram_bot_token).build()
+            # Try using the most basic approach for v20+
+            from telegram.ext import ApplicationBuilder
+            
+            builder = ApplicationBuilder()
+            builder.token(config.telegram_bot_token)
+            self.app = builder.build()
             
             # Add message handler for comment selection responses
             selection_handler = MessageHandler(
@@ -150,6 +160,9 @@ class TelegramResponder:
     async def send_test_message(self):
         """Send a test message to verify bot connectivity"""
         try:
+            if not self.app:
+                await self.initialize()
+            
             test_message = "🔧 <b>Bot Test Message</b>\n\n"
             test_message += "If you can see this, the bot can send messages.\n"
             test_message += "Please reply with 'test' to verify message reception."
@@ -169,12 +182,15 @@ class TelegramResponder:
         """Start polling for incoming messages"""
         try:
             if not self.app:
-                logger.error("Telegram app not initialized")
-                return
+                await self.initialize()
             
+            # In v22+, we need to use the new async approach
             await self.app.initialize()
             await self.app.start()
-            logger.info("Telegram responder polling started")
+            
+            # Start the updater as a background task
+            self.polling_task = asyncio.create_task(self.app.updater.start_polling())
+            logger.info("Telegram responder polling started successfully")
             
         except Exception as e:
             logger.error(f"Error starting Telegram responder polling: {e}")
@@ -183,6 +199,14 @@ class TelegramResponder:
     async def stop_polling(self):
         """Stop polling"""
         try:
+            # Cancel the polling task if it exists
+            if hasattr(self, 'polling_task') and self.polling_task:
+                self.polling_task.cancel()
+                try:
+                    await self.polling_task
+                except asyncio.CancelledError:
+                    pass
+                    
             if self.app:
                 await self.app.stop()
                 logger.info("Telegram responder polling stopped")
@@ -252,7 +276,7 @@ class TelegramResponder:
         except Exception as e:
             logger.error(f"Error handling selection response: {e}")
     
-    async def _handle_button_callback(self, update: Update, context):
+    async def _handle_button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle inline button callback for comment selection"""
         try:
             logger.info(f"🔥 Button callback received! Data: {update.callback_query.data}")
@@ -610,12 +634,21 @@ class ReportGenerator:
     
     def __init__(self):
         self.app = None
-        self._initialize_app()
+        # Don't initialize app in __init__, do it async later
     
-    def _initialize_app(self):
+    async def initialize(self):
+        """Initialize the Telegram application asynchronously"""
+        if self.app is None:
+            await self._initialize_app()
+    
+    async def _initialize_app(self):
         """Initialize the Telegram application"""
         try:
-            self.app = Application.builder().token(config.telegram_bot_token).build()
+            from telegram.ext import ApplicationBuilder
+            
+            builder = ApplicationBuilder()
+            builder.token(config.telegram_bot_token)
+            self.app = builder.build()
             logger.info("Report generator initialized")
         except Exception as e:
             logger.error(f"Error initializing report generator: {e}")

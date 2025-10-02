@@ -50,7 +50,9 @@ class TwitterShillingBot:
             
             # Initialize Telegram components first
             self.telegram_responder = create_telegram_responder()
+            await self.telegram_responder.initialize()  # Initialize async
             self.report_generator = create_report_generator()
+            await self.report_generator.initialize()  # Initialize async
             
             # Start telegram responder polling for message handling
             await self.telegram_responder.start_polling()

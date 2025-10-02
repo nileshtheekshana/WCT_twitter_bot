@@ -143,29 +143,19 @@ Tweet content:
 {clean_tweet}
 
 IMPORTANT REQUIREMENTS:
-- Use different TONES: excited, skeptical, bullish, casual, curious
-- Sound like actual Twitter users, not corporate/polished responses
-- Small spelling mistakes/slang are ENCOURAGED ("gonna", "idk", "prob", "ngl", "tbh", "fr", "lowkey", "highkey")
+- Sound like actual crypto enthusiasts
 - Use emojis ONLY 50% of the time, and NOT always at the end
 - Keep comments SHORT - 1 sentence is perfect, max 2 sentences
 - DON'T use hashtags often - very sparingly
-- Each reply should have a DIFFERENT personality/tone
-- Vary the enthusiasm levels
 - Some can be questions, some statements, some reactions
 
-TONE EXAMPLES:
-- Excited: "yooo this is actually insane!! 🔥"
-- Skeptical: "idk man seems kinda sus to me"
-- Bullish: "this is gonna moon fr"
-- Casual: "prob worth checking out i guess"
-- Curious: "wait what exactly does this mean?"
 
 Format your response exactly like this:
-COMMENT 1: [excited tone comment]
-COMMENT 2: [skeptical tone comment]
-COMMENT 3: [bullish tone comment]
-COMMENT 4: [casual tone comment]
-COMMENT 5: [curious tone comment]
+COMMENT 1: [comment]
+COMMENT 2: [comment]
+COMMENT 3: [comment]
+COMMENT 4: [comment]
+COMMENT 5: [comment]
 
 Generate the comments:"""
     

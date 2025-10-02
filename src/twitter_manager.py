@@ -1,5 +1,6 @@
 ﻿import asyncio
 import random
+import os
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import tweepy
@@ -15,7 +16,8 @@ class TwitterAPIManager:
     def __init__(self):
         self.main_client = None
         self.read_clients = []
-        self.current_read_index = 0
+        self.rotation_order = [1, 2, 3, 4, 5, 0]  # Account rotation order
+        self.rotation_position = self._load_last_used_account()  # Load from file
         self.usage_stats = {}
         self._initialize_clients()
     
@@ -75,41 +77,91 @@ class TwitterAPIManager:
         
         return client
     
+    def _load_last_used_account(self) -> int:
+        """Load the last used account from tweet.info file and return next position"""
+        try:
+            if os.path.exists("tweet.info"):
+                with open("tweet.info", "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                    if lines:
+                        # Get the last line and extract account number
+                        last_line = lines[-1].strip()
+                        if "Account" in last_line:
+                            # Extract account number from line like "2025-10-01 12:00:00 - Account 3 (read_3) used for reading tweet"
+                            parts = last_line.split("Account ")
+                            if len(parts) > 1:
+                                account_num_str = parts[1].split(" ")[0]
+                                try:
+                                    last_account = int(account_num_str)
+                                    # Find position of last account in rotation order
+                                    if last_account in self.rotation_order:
+                                        last_position = self.rotation_order.index(last_account)
+                                        # Return next position (wrap around if needed)
+                                        next_position = (last_position + 1) % len(self.rotation_order)
+                                        logger.info(f"📂 Loaded from tweet.info: Last account was {last_account}, starting with account {self.rotation_order[next_position]}")
+                                        return next_position
+                                except ValueError:
+                                    pass
+            
+            # Default: start with account 1 (position 0 in rotation_order)
+            logger.info("📂 No valid tweet.info found, starting with account 1")
+            return 0
+            
+        except Exception as e:
+            logger.warning(f"Error reading tweet.info: {e}, starting with account 1")
+            return 0
+    
     async def get_tweet_content(self, twitter_url: str) -> tuple[Optional[str], str]:
-        """Get tweet content using exactly ONE API call per task"""
+        """Get tweet content using intelligent account rotation with rate limit handling"""
         tweet_id = TextUtils.extract_tweet_id(twitter_url)
         if not tweet_id:
             logger.error(f"Could not extract tweet ID from URL: {twitter_url}")
             return None, "none"
         
-        # Use next client in rotation - SINGLE API CALL ONLY
-        client = self._get_next_read_client()
-        client_name = f"read_{self.current_read_index - 1}"
-        
-        try:
-            log_twitter_usage(client_name, "get_tweet")
+        # Try each account in rotation order until successful or all fail
+        max_attempts = len(self.rotation_order)
+        for attempt in range(max_attempts):
+            client = self._get_next_read_client()
             
-            # Single API call - no retries to minimize usage
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None, 
-                lambda: client.get_tweet(
-                    tweet_id, 
-                    tweet_fields=["text", "author_id"]
-                )
-            )
-            
-            if response and response.data:
-                content = TextUtils.clean_tweet_text(response.data.text)
-                logger.info(f"✅ Tweet read with {client_name} (1 API call): {content[:100]}...")
-                return content, client_name
+            # Determine client name for logging
+            current_account = self.rotation_order[(self.rotation_position - 1) % len(self.rotation_order)]
+            if current_account == 0:
+                client_name = "main"
             else:
-                logger.error(f"❌ No tweet data returned from {client_name}")
-                return None, client_name
+                client_name = f"read_{current_account}"
+            
+            try:
+                log_twitter_usage(client_name, "get_tweet")
                 
-        except Exception as e:
-            logger.error(f"❌ Failed to read tweet with {client_name}: {e}")
-            return None, client_name
+                # Single API call attempt
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None, 
+                    lambda: client.get_tweet(
+                        tweet_id, 
+                        tweet_fields=["text", "author_id"]
+                    )
+                )
+                
+                if response and response.data:
+                    content = TextUtils.clean_tweet_text(response.data.text)
+                    logger.info(f"✅ Tweet read with {client_name} (1 API call): {content[:100]}...")
+                    return content, client_name
+                else:
+                    logger.error(f"❌ No tweet data returned from {client_name}")
+                    continue  # Try next account
+                    
+            except Exception as e:
+                if "rate limit" in str(e).lower() or "429" in str(e):
+                    logger.warning(f"🚫 {client_name} rate limited, trying next account...")
+                    continue  # Try next account
+                else:
+                    logger.error(f"❌ Failed to read tweet with {client_name}: {e}")
+                    continue  # Try next account
+        
+        # All accounts failed
+        logger.error("❌ All Twitter accounts failed to read the tweet")
+        return None, "all_failed"
     
     async def post_reply(self, tweet_id: str, reply_text: str, telegram_responder=None, job_data=None) -> Optional[str]:
         """Post a reply using main account, with 5th account fallback if approved"""
@@ -209,8 +261,14 @@ class TwitterAPIManager:
             logger.warning(f"🚫 Account {client_name} is restricted/forbidden: {e}")
             return {"success": False, "error": f"Account restricted: {e}", "rate_limited": False, "restricted": True}
         except Exception as e:
-            logger.error(f"❌ Error with {client_name}: {e}")
-            return {"success": False, "error": str(e), "rate_limited": False, "restricted": False}
+            # Check if error is rate limit related
+            error_str = str(e).lower()
+            if "rate limit" in error_str or "429" in error_str or "too many requests" in error_str:
+                logger.warning(f"🚫 Rate limit detected for {client_name}: {e}")
+                return {"success": False, "error": str(e), "rate_limited": True, "restricted": False}
+            else:
+                logger.error(f"❌ Error with {client_name}: {e}")
+                return {"success": False, "error": str(e), "rate_limited": False, "restricted": False}
     
     async def _request_fallback_approval(self, telegram_responder, job_data: dict, restriction_type: str = "rate limited") -> bool:
         """Request approval from user to use 5th account fallback"""
@@ -252,10 +310,43 @@ class TwitterAPIManager:
             return False
     
     def _get_next_read_client(self) -> tweepy.Client:
-        """Get the next read client in rotation"""
-        client = self.read_clients[self.current_read_index]
-        self.current_read_index = (self.current_read_index + 1) % len(self.read_clients)
+        """Get the next read client in rotation following 1,2,3,4,5,0 pattern"""
+        # Get current account index from rotation order
+        account_index = self.rotation_order[self.rotation_position]
+        
+        # If account_index is 0, use main account for reading
+        if account_index == 0:
+            client = self.main_client
+            client_name = "main"
+        else:
+            # Use read account (account_index - 1 because array is 0-indexed)
+            actual_index = (account_index - 1) % len(self.read_clients)
+            client = self.read_clients[actual_index]
+            client_name = f"read_{account_index}"
+        
+        # Log which account is being used to tweet.info file
+        self._log_account_usage(account_index, client_name)
+        
+        # Move to next position in rotation
+        self.rotation_position = (self.rotation_position + 1) % len(self.rotation_order)
+        
+        logger.info(f"🔄 Using account {account_index} ({client_name}) for reading tweet")
         return client
+    
+    def _log_account_usage(self, account_number: int, client_name: str):
+        """Log which Twitter account was used to tweet.info file"""
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            log_entry = f"{timestamp} - Account {account_number} ({client_name}) used for reading tweet\n"
+            
+            # Append to tweet.info file
+            with open("tweet.info", "a", encoding="utf-8") as f:
+                f.write(log_entry)
+            
+            logger.debug(f"💾 Logged account {account_number} usage to tweet.info")
+            
+        except Exception as e:
+            logger.warning(f"Failed to log account usage to tweet.info: {e}")
     
     # Removed retry methods to ensure exactly 1 API call per operation
     
