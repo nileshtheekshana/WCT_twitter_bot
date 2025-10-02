@@ -311,28 +311,31 @@ class TelegramResponder:
                             # Get the selected comment
                             selected_comment = selection_data['comments'][option_index]
                             
-                            # Send confirmation message
+                            # Remove buttons from the original message but keep the content
+                            original_text = query.message.text
                             await query.edit_message_text(
+                                text=original_text + f"\n\n🎯 <b>Selected Option {option_index + 1}</b> ✅",
+                                parse_mode='HTML'
+                            )
+                            
+                            # Send a separate confirmation message
+                            await self.app.bot.send_message(
+                                chat_id=int(config.telegram_notification_group_id),
                                 text=f"✅ <b>Selection Confirmed for {task_id}</b>\n\n"
                                      f"You selected Option {option_index + 1}:\n"
                                      f"<code>{selected_comment}</code>\n\n"
-                                     f"🚀 Proceeding to post this reply...",
+                                     f"🚀 Proceeding to post this reply...\n\n"
+                                     f"💡 The message above contains all 5 alternative comments for future reference.",
                                 parse_mode='HTML'
                             )
                             
                             logger.info(f"📱 User selected option {option_index + 1} for {task_id} via button click")
                         else:
                             logger.warning(f"Selection for {task_id} already completed")
-                            await query.edit_message_text(
-                                text=f"⚠️ Selection for {task_id} has already been completed.",
-                                parse_mode='HTML'
-                            )
+                            await query.answer("⚠️ This selection has already been completed.", show_alert=True)
                     else:
                         logger.error(f"Task {task_id} not found in pending selections")
-                        await query.edit_message_text(
-                            text=f"⚠️ Selection for {task_id} has expired or is no longer available.",
-                            parse_mode='HTML'
-                        )
+                        await query.answer("⚠️ This selection has expired or is no longer available.", show_alert=True)
                 else:
                     logger.error(f"Invalid callback data format: {callback_data}")
             else:
@@ -567,7 +570,8 @@ class TelegramResponder:
                 'start_time': time.time(),
                 'timeout_minutes': config.comment_selection_timeout_minutes,
                 'completed': False,
-                'selected_option': None
+                'selected_option': None,
+                'message': None  # Will store the message object
             }
             
             # Send options to notification group using HTML parsing with buttons
@@ -577,6 +581,9 @@ class TelegramResponder:
                 parse_mode='HTML',
                 reply_markup=reply_markup
             )
+            
+            # Store the message in pending selections for later reference
+            self.pending_selections[task_id]['message'] = message
             
             logger.info(f"Sent comment selection request for {task_id} to notification group")
             
@@ -606,11 +613,26 @@ class TelegramResponder:
             
             logger.info(f"Timeout reached for {task_id}, randomly selected option {selected_index}: {selected_comment[:50]}...")
             
-            # Send timeout notification with button removal
+            # Remove buttons from original message but keep content
+            if task_id in self.pending_selections and self.pending_selections[task_id].get('message'):
+                original_message = self.pending_selections[task_id]['message']
+                try:
+                    await self.app.bot.edit_message_text(
+                        chat_id=original_message.chat_id,
+                        message_id=original_message.message_id,
+                        text=original_message.text + f"\n\n⏰ <b>Auto-selected Option {selected_index}</b> (Timeout)",
+                        parse_mode='HTML'
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not edit original message: {e}")
+            
+            # Send timeout notification as separate message
             escaped_comment = selected_comment.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-            timeout_message = f"⏰ <b>Timeout for {task_id}</b>\n\n"
+            timeout_message = f"⏰ <b>Auto-Selection for {task_id}</b>\n\n"
             timeout_message += f"No button clicked within {config.comment_selection_timeout_minutes} minutes.\n"
-            timeout_message += f"Randomly selected Option {selected_index}:\n<code>{escaped_comment}</code>"
+            timeout_message += f"Randomly selected Option {selected_index}:\n<code>{escaped_comment}</code>\n\n"
+            timeout_message += f"🚀 Proceeding to post this reply...\n\n"
+            timeout_message += f"💡 The message above contains all 5 alternative comments for future reference."
             
             await self.app.bot.send_message(
                 chat_id=int(config.telegram_notification_group_id),
