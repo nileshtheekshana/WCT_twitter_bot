@@ -24,10 +24,25 @@ async def authenticate_telegram():
     print()
     
     try:
+        # Validate API ID format
+        api_id_str = config.telegram_api_id
+        print(f"🔍 Checking API ID: {api_id_str}")
+        
+        try:
+            api_id = int(api_id_str)
+            if api_id > 2147483647:  # Max 32-bit integer
+                raise ValueError("API ID is too large")
+        except (ValueError, OverflowError) as e:
+            print(f"❌ Invalid TELEGRAM_API_ID: {api_id_str}")
+            print("📋 Telegram API IDs are typically 7-8 digits (e.g., 1234567)")
+            print("🌐 Get your correct API ID from: https://my.telegram.org")
+            print("📝 Update your .env file with the correct TELEGRAM_API_ID")
+            return False
+        
         # Create Telegram client
         client = Client(
             "twitter_bot_session",
-            api_id=int(config.telegram_api_id),
+            api_id=api_id,
             api_hash=config.telegram_api_hash,
             workdir="."
         )
