@@ -11,11 +11,12 @@ class AIValidator:
     
     def __init__(self):
         self.client = Groq(api_key=config.ai_api_key)
-        self.model = config.ai_model
+        # Use llama-3.1-8b-instant as default for better crypto comment generation
+        self.model = "llama-3.1-8b-instant"
         self.fallback_models = [
-            "llama-3.1-8b-instant",
-            "llama-3.3-70b-versatile", 
-            "openai/gpt-oss-20b"
+            "llama-3.1-70b-versatile", 
+            "mixtral-8x7b-32768",
+            "gemma2-9b-it"
         ]
         logger.info(f"AI Validator initialized with model: {self.model}")
     
@@ -136,8 +137,8 @@ Response:"""
         """Build prompt for generating comments"""
         clean_tweet = TextUtils.clean_text(tweet_text)
         
-        return f"""
-Generate 5 different Twitter replies that sound like REAL PEOPLE on X (Twitter). Make them feel completely natural and human.
+        return f"""Generate 5 Twitter replies that sound like REAL cryptolover on Twitter. 
+Make them feel completely natural and human.
 
 Tweet content:
 {clean_tweet}
@@ -145,19 +146,17 @@ Tweet content:
 IMPORTANT REQUIREMENTS:
 - Sound like actual crypto enthusiasts
 - Use emojis ONLY 50% of the time, and NOT always at the end
-- Keep comments SHORT - 1 sentence is perfect, max 2 sentences
+- Keep comments SHORT - 1 short sentence is perfect. 80% short 15% medium 5% long
+- be casual
 - DON'T use hashtags often - very sparingly
 - Some can be questions, some statements, some reactions
-
 
 Format your response exactly like this:
 COMMENT 1: [comment]
 COMMENT 2: [comment]
 COMMENT 3: [comment]
 COMMENT 4: [comment]
-COMMENT 5: [comment]
-
-Generate the comments:"""
+COMMENT 5: [comment]"""
     
     def _build_additional_comment_prompt(self, tweet_text: str, existing_comments: List[str]) -> str:
         """Build prompt for generating additional comments"""

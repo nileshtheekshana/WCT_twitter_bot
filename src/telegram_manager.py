@@ -311,10 +311,10 @@ class TelegramResponder:
                             # Get the selected comment
                             selected_comment = selection_data['comments'][option_index]
                             
-                            # Remove buttons from the original message but keep the content
-                            original_text = query.message.text
+                            # Use the stored original HTML text to preserve formatting
+                            original_html_text = selection_data.get('original_html_text', query.message.text)
                             await query.edit_message_text(
-                                text=original_text + f"\n\n🎯 <b>Selected Option {option_index + 1}</b> ✅",
+                                text=original_html_text + f"\n\n🎯 <b>Selected Option {option_index + 1}</b> ✅",
                                 parse_mode='HTML'
                             )
                             
@@ -571,7 +571,8 @@ class TelegramResponder:
                 'timeout_minutes': config.comment_selection_timeout_minutes,
                 'completed': False,
                 'selected_option': None,
-                'message': None  # Will store the message object
+                'message': None,  # Will store the message object
+                'original_html_text': options_message  # Store the original HTML formatted text
             }
             
             # Send options to notification group using HTML parsing with buttons
@@ -616,11 +617,12 @@ class TelegramResponder:
             # Remove buttons from original message but keep content
             if task_id in self.pending_selections and self.pending_selections[task_id].get('message'):
                 original_message = self.pending_selections[task_id]['message']
+                original_html_text = self.pending_selections[task_id].get('original_html_text', original_message.text)
                 try:
                     await self.app.bot.edit_message_text(
                         chat_id=original_message.chat_id,
                         message_id=original_message.message_id,
-                        text=original_message.text + f"\n\n⏰ <b>Auto-selected Option {selected_index}</b> (Timeout)",
+                        text=original_html_text + f"\n\n⏰ <b>Auto-selected Option {selected_index}</b> (Timeout)",
                         parse_mode='HTML'
                     )
                 except Exception as e:
