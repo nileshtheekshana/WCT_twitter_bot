@@ -49,7 +49,7 @@ class TwitterShillingBot:
             logger.info("Skipping Twitter client test during startup to preserve API quota")
             
             # Initialize Telegram components first
-            self.telegram_responder = create_telegram_responder()
+            self.telegram_responder = create_telegram_responder(shutdown_callback=self._initiate_shutdown)
             await self.telegram_responder.initialize()  # Initialize async
             self.report_generator = create_report_generator()
             await self.report_generator.initialize()  # Initialize async
@@ -137,6 +137,11 @@ class TwitterShillingBot:
         logger.info(f"Received signal {signum}, initiating shutdown...")
         self.shutdown_event.set()
     
+    async def _initiate_shutdown(self):
+        """Initiate bot shutdown via Telegram command"""
+        logger.info("Shutdown initiated via Telegram command")
+        self.shutdown_event.set()
+    
     async def _handle_new_job(self, message_text: str, job_data: dict):
         """Handle a new job message from Telegram"""
         start_time = datetime.now()
@@ -193,12 +198,12 @@ class TwitterShillingBot:
                 self.telegram_responder  # Pass telegram responder for interactive selection
             )
             
-            # Check if AI comment generation failed - SKIP TASK
+            # Check if task was skipped by user or AI failed to generate comments
             if not selected_comment or selected_comment is None:
-                error_msg = "❌ AI failed to generate comments - TASK SKIPPED (no template fallback)"
+                error_msg = "⏭️ TASK SKIPPED - User requested skip or AI failed to generate comments"
                 processing_data['errors'].append(error_msg)
                 await self._handle_job_error(error_msg, job_data)
-                logger.warning("🚫 Task skipped due to AI comment generation failure")
+                logger.warning("🚫 Task skipped by user or due to AI comment generation failure")
                 return
             
             processing_data['selected_comment'] = selected_comment

@@ -1,7 +1,7 @@
 import asyncio
 from typing import Callable, Optional, List, Dict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from telegram.ext import Application, MessageHandler, filters, ContextTypes, CallbackQueryHandler, CommandHandler
 from loguru import logger
 from .config import config
 from .utils import TextUtils, JobDataExtractor
@@ -109,11 +109,13 @@ class TelegramMonitor:
 class TelegramResponder:
     """Handles responding to Telegram messages and sending reports"""
     
-    def __init__(self):
+    def __init__(self, shutdown_callback=None):
         self.app = None
         self.pending_selections = {}  # Track pending comment selections
         self.pending_fallback_approvals = {}  # Track pending fallback approvals
         self.polling_task = None  # Track the polling task
+        self.shutdown_callback = shutdown_callback  # Callback to shutdown the bot
+        self.bot_start_time = None  # Track when bot started
         # Don't initialize app in __init__, do it async later
     
     async def initialize(self):
@@ -126,10 +128,21 @@ class TelegramResponder:
         try:
             # Try using the most basic approach for v20+
             from telegram.ext import ApplicationBuilder
+            import time
             
             builder = ApplicationBuilder()
             builder.token(config.telegram_bot_token)
             self.app = builder.build()
+            
+            # Set bot start time
+            self.bot_start_time = time.time()
+            
+            # Add command handlers for bot control
+            stopbot_handler = CommandHandler('stopbot', self._handle_stopbot_command)
+            self.app.add_handler(stopbot_handler)
+            
+            status_handler = CommandHandler('status_bot', self._handle_status_command)
+            self.app.add_handler(status_handler)
             
             # Add message handler for comment selection responses
             selection_handler = MessageHandler(
@@ -276,8 +289,76 @@ class TelegramResponder:
         except Exception as e:
             logger.error(f"Error handling selection response: {e}")
     
+    async def _handle_stopbot_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /stopbot command to shutdown the bot"""
+        try:
+            # Check if command is from the notification group
+            if update.message.chat_id != int(config.telegram_notification_group_id):
+                return
+            
+            logger.info(f"🛑 Stop bot command received from user {update.effective_user.username}")
+            
+            # Send confirmation message
+            await update.message.reply_text(
+                "🛑 <b>Bot Shutdown Initiated</b>\n\n"
+                "The Twitter Shilling Bot is shutting down gracefully...\n"
+                "All running tasks will be completed before shutdown.",
+                parse_mode='HTML'
+            )
+            
+            # Call shutdown callback if available
+            if self.shutdown_callback:
+                logger.info("Triggering bot shutdown via callback")
+                await self.shutdown_callback()
+            else:
+                logger.warning("No shutdown callback available")
+                
+        except Exception as e:
+            logger.error(f"Error handling stopbot command: {e}")
+    
+    async def _handle_status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /status_bot command to check bot status"""
+        try:
+            # Check if command is from the notification group
+            if update.message.chat_id != int(config.telegram_notification_group_id):
+                return
+            
+            logger.info(f"📊 Status command received from user {update.effective_user.username}")
+            
+            # Calculate uptime
+            if self.bot_start_time:
+                import time
+                uptime_seconds = int(time.time() - self.bot_start_time)
+                hours = uptime_seconds // 3600
+                minutes = (uptime_seconds % 3600) // 60
+                seconds = uptime_seconds % 60
+                uptime_str = f"{hours}h {minutes}m {seconds}s"
+            else:
+                uptime_str = "Unknown"
+            
+            # Count pending selections
+            pending_count = len([s for s in self.pending_selections.values() if not s.get('completed', False)])
+            
+            status_message = "🤖 <b>Bot Status Report</b>\n\n"
+            status_message += "✅ <b>Status:</b> Running\n"
+            status_message += f"⏱️ <b>Uptime:</b> {uptime_str}\n"
+            status_message += f"📊 <b>Pending Selections:</b> {pending_count}\n"
+            status_message += f"🔧 <b>Notification Group:</b> {config.telegram_notification_group_id}\n"
+            status_message += f"📢 <b>Main Channel:</b> {config.telegram_main_channel_id}\n\n"
+            status_message += "💡 <b>Available Commands:</b>\n"
+            status_message += "• /status_bot - Check bot status\n"
+            status_message += "• /stopbot - Shutdown bot"
+            
+            await update.message.reply_text(
+                status_message,
+                parse_mode='HTML'
+            )
+            
+        except Exception as e:
+            logger.error(f"Error handling status command: {e}")
+    
     async def _handle_button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle inline button callback for comment selection"""
+        """Handle inline button callback for comment selection and skip task"""
         try:
             logger.info(f"🔥 Button callback received! Data: {update.callback_query.data}")
             
@@ -286,6 +367,47 @@ class TelegramResponder:
             
             callback_data = query.data
             logger.info(f"Processing callback data: {callback_data}")
+            
+            # Handle skip task button
+            if callback_data.startswith('skip_'):
+                parts = callback_data.split('_')
+                if len(parts) >= 2:
+                    task_id = '_'.join(parts[1:])  # Handle task IDs with underscores
+                    logger.info(f"Skip task request for: {task_id}")
+                    
+                    # Check if this task is still pending
+                    if task_id in self.pending_selections:
+                        selection_data = self.pending_selections[task_id]
+                        
+                        if not selection_data['completed']:
+                            # Mark as completed with skip status
+                            selection_data['completed'] = True
+                            selection_data['selected_option'] = 'SKIPPED'
+                            
+                            # Update the message to show skip status
+                            original_html_text = selection_data.get('original_html_text', query.message.text)
+                            await query.edit_message_text(
+                                text=original_html_text + f"\n\n⏭️ <b>TASK SKIPPED</b> ❌",
+                                parse_mode='HTML'
+                            )
+                            
+                            # Send a separate confirmation message
+                            await self.app.bot.send_message(
+                                chat_id=int(config.telegram_notification_group_id),
+                                text=f"⏭️ <b>Task Skipped: {task_id}</b>\n\n"
+                                     f"✅ The task has been skipped successfully.\n"
+                                     f"🤖 Bot will continue with the next available task.",
+                                parse_mode='HTML'
+                            )
+                            
+                            logger.info(f"📱 User skipped task {task_id} via button click")
+                        else:
+                            logger.warning(f"Selection for {task_id} already completed")
+                            await query.answer("⚠️ This selection has already been completed.", show_alert=True)
+                    else:
+                        logger.error(f"Task {task_id} not found in pending selections")
+                        await query.answer("⚠️ This selection has expired or is no longer available.", show_alert=True)
+                return
             
             # Parse callback data: "select_{task_id}_{option_index}"
             if callback_data.startswith('select_'):
@@ -339,7 +461,7 @@ class TelegramResponder:
                 else:
                     logger.error(f"Invalid callback data format: {callback_data}")
             else:
-                logger.warning(f"Callback data doesn't start with 'select_': {callback_data}")
+                logger.warning(f"Unknown callback data format: {callback_data}")
             
         except Exception as e:
             logger.error(f"Error handling button callback: {e}")
@@ -562,6 +684,10 @@ class TelegramResponder:
                 callback_data = f"select_{task_id}_{i}"
                 keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
             
+            # Add skip task button at the end
+            skip_callback_data = f"skip_{task_id}"
+            keyboard.append([InlineKeyboardButton("⏭️ Skip This Task", callback_data=skip_callback_data)])
+            
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             # Store pending selection
@@ -597,6 +723,15 @@ class TelegramResponder:
                 selection_data = self.pending_selections.get(task_id)
                 if selection_data and selection_data.get('completed', False):
                     selected_option = selection_data.get('selected_option')
+                    
+                    # Handle skip task
+                    if selected_option == 'SKIPPED':
+                        logger.info(f"User skipped task {task_id}")
+                        # Clean up
+                        del self.pending_selections[task_id]
+                        return None  # Return None to indicate task was skipped
+                    
+                    # Handle normal selection
                     if selected_option is not None and 0 <= selected_option < len(comment_options):
                         selected_comment = comment_options[selected_option]
                         logger.info(f"User selected option {selected_option + 1} for {task_id}: {selected_comment[:50]}...")
@@ -805,9 +940,9 @@ def create_telegram_monitor(job_callback: Callable[[str, dict], None]) -> Telegr
     return TelegramMonitor(job_callback)
 
 
-def create_telegram_responder() -> TelegramResponder:
+def create_telegram_responder(shutdown_callback=None) -> TelegramResponder:
     """Create and return a Telegram responder instance"""
-    return TelegramResponder()
+    return TelegramResponder(shutdown_callback=shutdown_callback)
 
 
 def create_report_generator() -> ReportGenerator:
