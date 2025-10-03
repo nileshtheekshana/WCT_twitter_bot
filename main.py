@@ -49,7 +49,10 @@ class TwitterShillingBot:
             logger.info("Skipping Twitter client test during startup to preserve API quota")
             
             # Initialize Telegram components first
-            self.telegram_responder = create_telegram_responder()
+            self.telegram_responder = create_telegram_responder(
+                shutdown_callback=self._initiate_shutdown, 
+                restart_callback=self._initiate_restart
+            )
             await self.telegram_responder.initialize()  # Initialize async
             self.report_generator = create_report_generator()
             await self.report_generator.initialize()  # Initialize async
@@ -137,6 +140,18 @@ class TwitterShillingBot:
         logger.info(f"Received signal {signum}, initiating shutdown...")
         self.shutdown_event.set()
     
+    async def _initiate_shutdown(self):
+        """Initiate bot shutdown via Telegram command"""
+        logger.info("Shutdown initiated via Telegram command")
+        self.shutdown_event.set()
+    
+    async def _initiate_restart(self):
+        """Initiate bot restart via Telegram command"""
+        logger.info("Restart initiated via Telegram command")
+        # For now, restart is just resetting internal state
+        # The actual restart logic is handled in the telegram_manager
+        logger.info("Restart command processed by telegram manager")
+    
     async def _handle_new_job(self, message_text: str, job_data: dict):
         """Handle a new job message from Telegram"""
         start_time = datetime.now()
@@ -148,6 +163,17 @@ class TwitterShillingBot:
         }
         
         try:
+            # Check if bot is paused
+            if self.telegram_responder and self.telegram_responder.is_bot_paused():
+                logger.info(f"Bot is paused, skipping job: {job_data.get('task_id', 'Unknown')}")
+                await self.telegram_responder.send_error_notification(
+                    f"⏸️ Bot is paused - Job skipped: {job_data.get('task_id', 'Unknown')}\n"
+                    f"Reason: {self.telegram_responder.pause_reason or 'Manual pause'}\n"
+                    f"Use /resume to continue processing jobs.",
+                    job_data
+                )
+                return
+            
             logger.info(f"Processing new job: {job_data.get('task_id', 'Unknown')}")
             
             # Step 1: Validate if it's a valid Twitter job
@@ -193,12 +219,12 @@ class TwitterShillingBot:
                 self.telegram_responder  # Pass telegram responder for interactive selection
             )
             
-            # Check if AI comment generation failed - SKIP TASK
+            # Check if task was skipped by user or AI failed to generate comments
             if not selected_comment or selected_comment is None:
-                error_msg = "❌ AI failed to generate comments - TASK SKIPPED (no template fallback)"
+                error_msg = "⏭️ TASK SKIPPED - User requested skip or AI failed to generate comments"
                 processing_data['errors'].append(error_msg)
                 await self._handle_job_error(error_msg, job_data)
-                logger.warning("🚫 Task skipped due to AI comment generation failure")
+                logger.warning("🚫 Task skipped by user or due to AI comment generation failure")
                 return
             
             processing_data['selected_comment'] = selected_comment
@@ -252,6 +278,10 @@ class TwitterShillingBot:
     async def _handle_job_error(self, error_message: str, job_data: dict, processing_data: dict = None):
         """Handle job processing errors"""
         try:
+            # Increment error count
+            if self.telegram_responder:
+                self.telegram_responder.increment_error_count()
+            
             # Send error notification
             await self.telegram_responder.send_error_notification(error_message, job_data)
             
