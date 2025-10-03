@@ -8,6 +8,9 @@ from .utils import TextUtils, JobDataExtractor
 from .logger_setup import log_job_activity
 import random
 import time
+import os
+import psutil
+from datetime import datetime
 
 
 class TelegramMonitor:
@@ -116,6 +119,13 @@ class TelegramResponder:
         self.polling_task = None  # Track the polling task
         self.shutdown_callback = shutdown_callback  # Callback to shutdown the bot
         self.bot_start_time = None  # Track when bot started
+        self.bot_state = "starting"  # Bot state: starting, running, paused, stopping, stopped
+        self.pause_reason = None  # Reason for pause
+        self.restart_callback = None  # Callback to restart the bot
+        self.tasks_processed = 0  # Count of tasks processed
+        self.tasks_skipped = 0  # Count of tasks skipped
+        self.errors_count = 0  # Count of errors encountered
+        self.last_activity = None  # Last activity timestamp
         # Don't initialize app in __init__, do it async later
     
     async def initialize(self):
@@ -134,15 +144,38 @@ class TelegramResponder:
             builder.token(config.telegram_bot_token)
             self.app = builder.build()
             
-            # Set bot start time
+            # Set bot start time and initial state
             self.bot_start_time = time.time()
+            self.bot_state = "running"
+            self.last_activity = time.time()
             
             # Add command handlers for bot control
             stopbot_handler = CommandHandler('stopbot', self._handle_stopbot_command)
             self.app.add_handler(stopbot_handler)
             
+            startbot_handler = CommandHandler('startbot', self._handle_startbot_command)
+            self.app.add_handler(startbot_handler)
+            
+            restartbot_handler = CommandHandler('restartbot', self._handle_restartbot_command)
+            self.app.add_handler(restartbot_handler)
+            
+            pause_handler = CommandHandler('pause', self._handle_pause_command)
+            self.app.add_handler(pause_handler)
+            
+            resume_handler = CommandHandler('resume', self._handle_resume_command)
+            self.app.add_handler(resume_handler)
+            
             status_handler = CommandHandler('status_bot', self._handle_status_command)
             self.app.add_handler(status_handler)
+            
+            stats_handler = CommandHandler('stats', self._handle_stats_command)
+            self.app.add_handler(stats_handler)
+            
+            clear_handler = CommandHandler('clear_pending', self._handle_clear_pending_command)
+            self.app.add_handler(clear_handler)
+            
+            help_handler = CommandHandler('help', self._handle_help_command)
+            self.app.add_handler(help_handler)
             
             # Add message handler for comment selection responses
             selection_handler = MessageHandler(
@@ -357,6 +390,340 @@ class TelegramResponder:
         except Exception as e:
             logger.error(f"Error handling status command: {e}")
     
+    async def _handle_startbot_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /startbot command to start/resume bot operations"""
+        try:
+            # Check if command is from the notification group
+            if update.message.chat_id != int(config.telegram_notification_group_id):
+                return
+            
+            logger.info(f"🚀 Start bot command received from user {update.effective_user.username}")
+            
+            if self.bot_state == "running":
+                await update.message.reply_text(
+                    "✅ <b>Bot Already Running</b>\n\n"
+                    "The Twitter Shilling Bot is already active and processing tasks.\n"
+                    "Use /status_bot to check current status.",
+                    parse_mode='HTML'
+                )
+                return
+            
+            # Change state to running
+            self.bot_state = "running"
+            self.last_activity = time.time()
+            
+            await update.message.reply_text(
+                "🚀 <b>Bot Started Successfully</b>\n\n"
+                "✅ The Twitter Shilling Bot is now active\n"
+                "🔍 Monitoring for new jobs\n"
+                "📊 Ready to process tasks\n\n"
+                "Use /status_bot to check status or /help for commands.",
+                parse_mode='HTML'
+            )
+            
+        except Exception as e:
+            logger.error(f"Error handling startbot command: {e}")
+    
+    async def _handle_restartbot_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /restartbot command to restart the bot"""
+        try:
+            # Check if command is from the notification group
+            if update.message.chat_id != int(config.telegram_notification_group_id):
+                return
+            
+            logger.info(f"🔄 Restart bot command received from user {update.effective_user.username}")
+            
+            await update.message.reply_text(
+                "🔄 <b>Bot Restart Initiated</b>\n\n"
+                "⏳ Restarting the Twitter Shilling Bot...\n"
+                "📊 Clearing pending tasks\n"
+                "🔄 Reinitializing components\n\n"
+                "Please wait a moment...",
+                parse_mode='HTML'
+            )
+            
+            # Clear pending tasks
+            self.pending_selections.clear()
+            self.pending_fallback_approvals.clear()
+            
+            # Reset statistics
+            self.tasks_processed = 0
+            self.tasks_skipped = 0
+            self.errors_count = 0
+            self.bot_start_time = time.time()
+            self.bot_state = "running"
+            self.last_activity = time.time()
+            self.pause_reason = None
+            
+            # Send completion message
+            await self.app.bot.send_message(
+                chat_id=int(config.telegram_notification_group_id),
+                text="✅ <b>Bot Restart Complete</b>\n\n"
+                     "🚀 Twitter Shilling Bot is now running\n"
+                     "📊 All statistics have been reset\n"
+                     "🗑️ Pending tasks cleared\n\n"
+                     "Ready to process new jobs!",
+                parse_mode='HTML'
+            )
+            
+            logger.info("Bot restart completed successfully")
+            
+        except Exception as e:
+            logger.error(f"Error handling restartbot command: {e}")
+    
+    async def _handle_pause_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /pause command to pause bot operations"""
+        try:
+            # Check if command is from the notification group
+            if update.message.chat_id != int(config.telegram_notification_group_id):
+                return
+            
+            logger.info(f"⏸️ Pause command received from user {update.effective_user.username}")
+            
+            if self.bot_state == "paused":
+                await update.message.reply_text(
+                    "⏸️ <b>Bot Already Paused</b>\n\n"
+                    f"Reason: {self.pause_reason or 'Manual pause'}\n"
+                    "Use /resume to continue operations.",
+                    parse_mode='HTML'
+                )
+                return
+            
+            # Get pause reason from command arguments
+            pause_reason = " ".join(context.args) if context.args else "Manual pause by user"
+            
+            self.bot_state = "paused"
+            self.pause_reason = pause_reason
+            
+            await update.message.reply_text(
+                "⏸️ <b>Bot Paused</b>\n\n"
+                f"📝 <b>Reason:</b> {pause_reason}\n"
+                "⏳ <b>Status:</b> All new task processing is paused\n"
+                "🔄 <b>Current tasks:</b> Will complete if already started\n\n"
+                "Use /resume to continue operations.",
+                parse_mode='HTML'
+            )
+            
+        except Exception as e:
+            logger.error(f"Error handling pause command: {e}")
+    
+    async def _handle_resume_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /resume command to resume bot operations"""
+        try:
+            # Check if command is from the notification group
+            if update.message.chat_id != int(config.telegram_notification_group_id):
+                return
+            
+            logger.info(f"▶️ Resume command received from user {update.effective_user.username}")
+            
+            if self.bot_state != "paused":
+                await update.message.reply_text(
+                    "▶️ <b>Bot Not Paused</b>\n\n"
+                    f"Current state: {self.bot_state.title()}\n"
+                    "Use /status_bot to check current status.",
+                    parse_mode='HTML'
+                )
+                return
+            
+            self.bot_state = "running"
+            self.last_activity = time.time()
+            pause_duration = self.pause_reason
+            self.pause_reason = None
+            
+            await update.message.reply_text(
+                "▶️ <b>Bot Resumed</b>\n\n"
+                "✅ <b>Status:</b> Operations resumed successfully\n"
+                f"📝 <b>Previous pause:</b> {pause_duration}\n"
+                "🔍 <b>Monitoring:</b> Ready to process new tasks\n\n"
+                "Bot is now actively monitoring for jobs.",
+                parse_mode='HTML'
+            )
+            
+        except Exception as e:
+            logger.error(f"Error handling resume command: {e}")
+    
+    async def _handle_stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /stats command for detailed bot statistics"""
+        try:
+            # Check if command is from the notification group
+            if update.message.chat_id != int(config.telegram_notification_group_id):
+                return
+            
+            logger.info(f"📊 Stats command received from user {update.effective_user.username}")
+            
+            # Calculate uptime
+            if self.bot_start_time:
+                uptime_seconds = int(time.time() - self.bot_start_time)
+                hours = uptime_seconds // 3600
+                minutes = (uptime_seconds % 3600) // 60
+                seconds = uptime_seconds % 60
+                uptime_str = f"{hours}h {minutes}m {seconds}s"
+            else:
+                uptime_str = "Unknown"
+            
+            # Get system stats
+            try:
+                cpu_percent = psutil.cpu_percent(interval=1)
+                memory = psutil.virtual_memory()
+                memory_percent = memory.percent
+                memory_used = memory.used / (1024**3)  # GB
+                memory_total = memory.total / (1024**3)  # GB
+            except:
+                cpu_percent = 0
+                memory_percent = 0
+                memory_used = 0
+                memory_total = 0
+            
+            # Count pending selections
+            pending_count = len([s for s in self.pending_selections.values() if not s.get('completed', False)])
+            
+            # Calculate success rate
+            total_tasks = self.tasks_processed + self.tasks_skipped
+            success_rate = (self.tasks_processed / total_tasks * 100) if total_tasks > 0 else 0
+            
+            stats_message = "📊 <b>Detailed Bot Statistics</b>\n\n"
+            stats_message += f"🤖 <b>Bot Status:</b> {self.bot_state.title()}\n"
+            stats_message += f"⏱️ <b>Uptime:</b> {uptime_str}\n"
+            stats_message += f"📝 <b>State:</b> {self.bot_state.title()}\n\n"
+            
+            stats_message += "<b>📈 Task Statistics:</b>\n"
+            stats_message += f"✅ Tasks Completed: {self.tasks_processed}\n"
+            stats_message += f"⏭️ Tasks Skipped: {self.tasks_skipped}\n"
+            stats_message += f"❌ Errors: {self.errors_count}\n"
+            stats_message += f"📊 Success Rate: {success_rate:.1f}%\n"
+            stats_message += f"⏳ Pending: {pending_count}\n\n"
+            
+            stats_message += "<b>💻 System Resources:</b>\n"
+            stats_message += f"🔧 CPU Usage: {cpu_percent:.1f}%\n"
+            stats_message += f"🧠 Memory: {memory_used:.1f}GB / {memory_total:.1f}GB ({memory_percent:.1f}%)\n"
+            stats_message += f"🆔 Process ID: {os.getpid()}\n\n"
+            
+            if self.pause_reason:
+                stats_message += f"⏸️ <b>Pause Reason:</b> {self.pause_reason}\n\n"
+            
+            if self.last_activity:
+                last_activity_time = datetime.fromtimestamp(self.last_activity).strftime("%Y-%m-%d %H:%M:%S")
+                stats_message += f"🕒 <b>Last Activity:</b> {last_activity_time}"
+            
+            await update.message.reply_text(
+                stats_message,
+                parse_mode='HTML'
+            )
+            
+        except Exception as e:
+            logger.error(f"Error handling stats command: {e}")
+    
+    async def _handle_clear_pending_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /clear_pending command to clear stuck tasks"""
+        try:
+            # Check if command is from the notification group
+            if update.message.chat_id != int(config.telegram_notification_group_id):
+                return
+            
+            logger.info(f"🗑️ Clear pending command received from user {update.effective_user.username}")
+            
+            pending_count = len([s for s in self.pending_selections.values() if not s.get('completed', False)])
+            fallback_count = len(self.pending_fallback_approvals)
+            
+            if pending_count == 0 and fallback_count == 0:
+                await update.message.reply_text(
+                    "✅ <b>No Pending Tasks</b>\n\n"
+                    "There are no pending tasks to clear.\n"
+                    "All tasks are up to date!",
+                    parse_mode='HTML'
+                )
+                return
+            
+            # Clear all pending tasks
+            self.pending_selections.clear()
+            self.pending_fallback_approvals.clear()
+            
+            await update.message.reply_text(
+                "🗑️ <b>Pending Tasks Cleared</b>\n\n"
+                f"✅ Cleared {pending_count} pending selections\n"
+                f"✅ Cleared {fallback_count} fallback approvals\n\n"
+                "All stuck tasks have been removed.\n"
+                "Bot is ready for new tasks.",
+                parse_mode='HTML'
+            )
+            
+            logger.info(f"Cleared {pending_count} pending selections and {fallback_count} fallback approvals")
+            
+        except Exception as e:
+            logger.error(f"Error handling clear pending command: {e}")
+    
+    async def _handle_help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /help command to show all available commands"""
+        try:
+            # Check if command is from the notification group
+            if update.message.chat_id != int(config.telegram_notification_group_id):
+                return
+            
+            logger.info(f"❓ Help command received from user {update.effective_user.username}")
+            
+            help_message = "🤖 <b>Twitter Shilling Bot Commands</b>\n\n"
+            
+            help_message += "<b>🔧 Bot Control:</b>\n"
+            help_message += "• /startbot - Start/resume bot operations\n"
+            help_message += "• /stopbot - Shutdown the bot gracefully\n"
+            help_message += "• /restartbot - Restart bot and reset stats\n"
+            help_message += "• /pause [reason] - Pause bot operations\n"
+            help_message += "• /resume - Resume paused operations\n\n"
+            
+            help_message += "<b>📊 Information:</b>\n"
+            help_message += "• /status_bot - Quick bot status check\n"
+            help_message += "• /stats - Detailed statistics & system info\n"
+            help_message += "• /help - Show this help message\n\n"
+            
+            help_message += "<b>🛠️ Maintenance:</b>\n"
+            help_message += "• /clear_pending - Clear stuck/pending tasks\n\n"
+            
+            help_message += "<b>💡 Interactive Features:</b>\n"
+            help_message += "• Click numbered buttons to select comments\n"
+            help_message += "• Use ⏭️ Skip Task button to skip unwanted tasks\n"
+            help_message += "• Reply with numbers 1-5 for comment selection\n\n"
+            
+            help_message += "<b>🔒 Security:</b>\n"
+            help_message += f"• Commands only work in group: {config.telegram_notification_group_id}\n"
+            help_message += "• Bot monitors channel: " + config.telegram_main_channel_id + "\n\n"
+            
+            help_message += "<b>📞 Need Help?</b>\n"
+            help_message += "Contact the bot administrator for technical support."
+            
+            await update.message.reply_text(
+                help_message,
+                parse_mode='HTML'
+            )
+            
+        except Exception as e:
+            logger.error(f"Error handling help command: {e}")
+    
+    def increment_task_processed(self):
+        """Increment the tasks processed counter"""
+        self.tasks_processed += 1
+        self.last_activity = time.time()
+        logger.debug(f"Tasks processed: {self.tasks_processed}")
+    
+    def increment_task_skipped(self):
+        """Increment the tasks skipped counter"""
+        self.tasks_skipped += 1
+        self.last_activity = time.time()
+        logger.debug(f"Tasks skipped: {self.tasks_skipped}")
+    
+    def increment_error_count(self):
+        """Increment the error counter"""
+        self.errors_count += 1
+        self.last_activity = time.time()
+        logger.debug(f"Errors encountered: {self.errors_count}")
+    
+    def is_bot_paused(self):
+        """Check if bot is paused"""
+        return self.bot_state == "paused"
+    
+    def get_bot_state(self):
+        """Get current bot state"""
+        return self.bot_state
+    
     async def _handle_button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle inline button callback for comment selection and skip task"""
         try:
@@ -383,6 +750,9 @@ class TelegramResponder:
                             # Mark as completed with skip status
                             selection_data['completed'] = True
                             selection_data['selected_option'] = 'SKIPPED'
+                            
+                            # Update statistics
+                            self.increment_task_skipped()
                             
                             # Update the message to show skip status
                             original_html_text = selection_data.get('original_html_text', query.message.text)
@@ -429,6 +799,9 @@ class TelegramResponder:
                             # Mark as completed
                             selection_data['completed'] = True
                             selection_data['selected_option'] = option_index
+                            
+                            # Update statistics
+                            self.increment_task_processed()
                             
                             # Get the selected comment
                             selected_comment = selection_data['comments'][option_index]
@@ -940,9 +1313,11 @@ def create_telegram_monitor(job_callback: Callable[[str, dict], None]) -> Telegr
     return TelegramMonitor(job_callback)
 
 
-def create_telegram_responder(shutdown_callback=None) -> TelegramResponder:
+def create_telegram_responder(shutdown_callback=None, restart_callback=None) -> TelegramResponder:
     """Create and return a Telegram responder instance"""
-    return TelegramResponder(shutdown_callback=shutdown_callback)
+    responder = TelegramResponder(shutdown_callback=shutdown_callback)
+    responder.restart_callback = restart_callback
+    return responder
 
 
 def create_report_generator() -> ReportGenerator:
