@@ -21,7 +21,7 @@ class SimpleAIChecker:
     
     def __init__(self):
         # Default AI model
-        self.current_model = "llama-3.1-8b-instant"
+        self.current_model = "llama-3.3-70b-versatile"
         
         # Available models
         self.models = [
@@ -54,20 +54,12 @@ COMMENT 4: [comment]
 COMMENT 5: [comment]"""
 
         # Default test tweet
-        self.test_tweet = """🎉 Celebrate $CELB #KuCoin with an exciting giveaway!
+        self.test_tweet = """LATEST🚨 
 
-🎁290,000 CELB for 100 winners!
+The White House says President Trump has "officially ended the 
+Biden administration's war on the cryptocurrency industry."🇺🇸
 
-How to enter:
-✅ Follow @kucoincom and @CelebPlusToken
-✅ Retweet this post
-✅ Tag 3 friends and use #CELB
-🗓️ Deadline: October 9
-
-Join now and increase your chances of winning!
-👉 bit.ly/3YLEqR6
-
-#KuCoin #Giveaway #CELB #Cryptocurrency #Airdrop"""
+"""
         
         # Initialize AI client
         try:
