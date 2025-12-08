@@ -4,6 +4,7 @@ import os
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import tweepy
+from tweepy.errors import TooManyRequests, Forbidden, Unauthorized
 from loguru import logger
 from .config import config
 from .utils import TextUtils, RetryHelper, RateLimiter
@@ -65,7 +66,7 @@ class TwitterAPIManager:
             consumer_secret=config_dict["consumer_secret"],
             access_token=config_dict["access_token"],
             access_token_secret=config_dict["access_token_secret"],
-            wait_on_rate_limit=True
+            wait_on_rate_limit=False  # Don't wait - rotate to next account instead
         )
         
         # Initialize usage stats
@@ -150,6 +151,10 @@ class TwitterAPIManager:
                 else:
                     logger.error(f"❌ No tweet data returned from {client_name}")
                     continue  # Try next account
+            
+            except TooManyRequests as e:
+                logger.warning(f"🚫 {client_name} rate limited (429), rotating to next account...")
+                continue  # Try next account immediately
                     
             except Exception as e:
                 if "rate limit" in str(e).lower() or "429" in str(e):
@@ -402,28 +407,31 @@ Reply:"""
             logger.error(f"❌ Error generating AI comment: {e}")
             return None
     
-    async def generate_multiple_ai_comments(self, tweet_content: str, count: int = 5) -> List[str]:
-        """Generate exactly 5 AI comments using batch generation"""
+    async def generate_multiple_ai_comments(self, tweet_content: str, count: int = 5) -> tuple[List[str], str]:
+        """Generate exactly 5 AI comments using batch generation
+        Returns: (comments list, model_used)
+        """
         try:
             if not self.ai_validator:
                 logger.error("❌ AI validator not available - cannot generate comments")
-                return []
+                return [], "No AI"
             
             # Use the AI validator's generate_comments method for batch generation
-            comments = await self.ai_validator.generate_comments(tweet_content)
+            # Returns (comments, model_used)
+            comments, model_used = await self.ai_validator.generate_comments(tweet_content)
             
             if len(comments) == 0:
                 logger.error("❌ AI failed to generate any comments - TASK WILL BE SKIPPED")
-                return []
+                return [], model_used
             elif len(comments) < 5:
                 logger.warning(f"⚠️ Only generated {len(comments)}/5 AI comments")
             
-            logger.info(f"✅ Generated {len(comments)} AI comments successfully")
-            return comments[:5]  # Return exactly 5 comments
+            logger.info(f"✅ Generated {len(comments)} AI comments using {model_used}")
+            return comments[:5], model_used  # Return exactly 5 comments and model used
             
         except Exception as e:
             logger.error(f"❌ Error generating multiple AI comments: {e}")
-            return []
+            return [], "Error"
     
     def _extract_themes(self, text: str) -> List[str]:
         """Extract key themes from tweet text"""
@@ -455,13 +463,16 @@ Reply:"""
         """Generate AI comments and handle interactive selection - skip task if AI fails"""
         try:
             # Generate 5 AI comments - NO TEMPLATES
-            all_comments = await self.generate_multiple_ai_comments(tweet_content, 5)
+            all_comments, model_used = await self.generate_multiple_ai_comments(tweet_content, 5)
+            
+            # Store the model used in job_data for telegram display
+            job_data['ai_model_used'] = model_used
             
             if not all_comments or len(all_comments) == 0:
                 logger.error("❌ NO AI COMMENTS GENERATED - TASK WILL BE SKIPPED")
                 return None, []  # This will cause the task to be skipped
             
-            logger.info(f"✅ Generated {len(all_comments)} AI comments for interactive selection")
+            logger.info(f"✅ Generated {len(all_comments)} AI comments using {model_used} for interactive selection")
             
             # MANDATORY: Send to Telegram for user selection
             if telegram_responder:

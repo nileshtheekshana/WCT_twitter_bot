@@ -1021,9 +1021,13 @@ class TelegramResponder:
                 return comment_options[0]  # Return first as fallback
             
             task_id = job_data.get('task_id', 'Unknown')
+            ai_model_used = job_data.get('ai_model_used', 'Unknown')
             
             # Format the options message using HTML for better parsing
             options_message = f"🎯 <b>Comment Selection for {task_id}</b>\n\n"
+            
+            # Add AI model used
+            options_message += f"🤖 <b>AI Model:</b> <code>{ai_model_used}</code>\n\n"
             
             # Add the actual tweet content so user can see what they're replying to
             if tweet_text:

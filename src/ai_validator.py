@@ -9,7 +9,7 @@ from .utils import TextUtils, RetryHelper
 
 
 class AIValidator:
-    """AI service for validating Twitter jobs (Groq) and generating comments (ChatGPT)"""
+    """AI service for validating Twitter jobs (Groq) and generating comments (GPT-4o > Groq)"""
     
     def __init__(self):
         # Groq client for validation
@@ -22,22 +22,31 @@ class AIValidator:
             "gemma2-9b-it"
         ]
         
-        # ChatGPT client for comment generation
-        try:
-            self.chatgpt_client = OpenAI(
-                base_url="https://models.github.ai/inference",
-                api_key=os.environ.get("GITHUB_TOKEN")
-            )
-            self.chatgpt_model = "openai/gpt-4o"
-            self.chatgpt_available = True
-            logger.info("ChatGPT client initialized for comment generation")
-        except Exception as e:
-            logger.warning(f"ChatGPT client initialization failed: {e}. Falling back to Groq for comments.")
-            self.chatgpt_available = False
+        # GitHub Models client for comment generation (GPT-4o -> Groq fallback)
+        github_token = os.environ.get("GITHUB_TOKEN")
+        if github_token and github_token.startswith("github_pat_"):
+            try:
+                self.github_client = OpenAI(
+                    base_url="https://models.github.ai/inference",
+                    api_key=github_token
+                )
+                self.github_available = True
+                # Model priority: GPT-4o first, then GPT-4o-mini as fallback
+                self.github_models = ["openai/gpt-4o", "openai/gpt-4o-mini"]
+                logger.info("GitHub Models client initialized (GPT-4o -> Groq fallback)")
+            except Exception as e:
+                logger.warning(f"GitHub Models client initialization failed: {e}. Using Groq only.")
+                self.github_available = False
+        else:
+            self.github_available = False
+            logger.info("No GitHub token configured. Using Groq for comment generation.")
+        
+        # Track which model was used for the last generation
+        self.last_model_used = None
         
         logger.info(f"AI Validator initialized with Groq model: {self.model}")
-        if self.chatgpt_available:
-            logger.info(f"ChatGPT model available: {self.chatgpt_model}")
+        if self.github_available:
+            logger.info(f"GitHub Models available: {', '.join(self.github_models)}")
     
     async def is_valid_twitter_job(self, message_text: str) -> tuple[bool, str]:
         """
@@ -67,37 +76,43 @@ class AIValidator:
             logger.error(f"Error validating Twitter job: {e}")
             return False, f"Validation error: {str(e)}"
     
-    async def generate_comments(self, tweet_text: str, job_context: str = "") -> List[str]:
+    async def generate_comments(self, tweet_text: str, job_context: str = "") -> tuple[List[str], str]:
         """
-        Generate 5 alternative comments for a Twitter post using ChatGPT (preferred) or Groq (fallback)
-        Returns: List of 5 comment strings
+        Generate 5 alternative comments for a Twitter post
+        Priority: GPT-5 -> GPT-4o -> Groq
+        Returns: (List of 5 comment strings, model_used)
         """
+        self.last_model_used = None
+        
+        # Try GitHub Models first (GPT-5 -> GPT-4o)
+        if self.github_available:
+            for model in self.github_models:
+                try:
+                    comments = await self._generate_comments_github(tweet_text, job_context, model)
+                    if comments and len(comments) >= 5:
+                        self.last_model_used = model
+                        return comments[:5], model
+                except Exception as e:
+                    logger.warning(f"{model} failed: {e}, trying next model...")
+                    continue
+        
+        # Fallback to Groq
         try:
-            # Try ChatGPT first
-            if self.chatgpt_available:
-                return await self._generate_comments_chatgpt(tweet_text, job_context)
-            else:
-                # Fallback to Groq
-                logger.info("Using Groq for comment generation (ChatGPT unavailable)")
-                return await self._generate_comments_groq(tweet_text, job_context)
-                
+            logger.info("Using Groq for comment generation (GitHub Models unavailable)")
+            comments = await self._generate_comments_groq(tweet_text, job_context)
+            self.last_model_used = f"Groq/{self.model}"
+            return comments, f"Groq/{self.model}"
         except Exception as e:
-            logger.error(f"Error generating comments: {e}")
-            # Return fallback comments
-            return [
-                "this looks interesting 👀",
-                "good stuff here",
-                "thanks for sharing this",
-                "solid content fr",
-                "always appreciate these updates"
-            ]
+            logger.error(f"All AI models failed: {e}")
+            self.last_model_used = "Fallback (no AI)"
+            return self._get_fallback_comments(), "Fallback (no AI)"
     
-    async def _generate_comments_chatgpt(self, tweet_text: str, job_context: str = "") -> List[str]:
-        """Generate comments using ChatGPT"""
+    async def _generate_comments_github(self, tweet_text: str, job_context: str, model: str) -> List[str]:
+        """Generate comments using GitHub Models (GPT-4o)"""
         try:
             prompt = self._build_chatgpt_comment_prompt(tweet_text, job_context)
             
-            response = self.chatgpt_client.chat.completions.create(
+            response = self.github_client.chat.completions.create(
                 messages=[
                     {
                         "role": "system", 
@@ -105,27 +120,31 @@ class AIValidator:
                     },
                     {"role": "user", "content": prompt}
                 ],
-                model=self.chatgpt_model,
+                model=model,
                 max_tokens=400,
-                temperature=0.7
+                temperature=0.8
             )
             
             result = response.choices[0].message.content
+            logger.info(f"Raw {model} response: {result[:300]}...")
             comments = self._parse_comments_response(result)
             
+            if len(comments) < 3:
+                # Too few comments parsed - try next model instead of filling with fallbacks
+                logger.warning(f"{model} generated only {len(comments)} comments, trying next model...")
+                raise Exception(f"Insufficient comments parsed from {model}")
+            
             if len(comments) < 5:
-                logger.warning(f"ChatGPT generated only {len(comments)} comments, padding with fallbacks")
-                # Add fallback comments to reach 5
+                logger.info(f"{model} generated {len(comments)} comments, filling remaining with fallbacks")
                 fallbacks = self._get_fallback_comments()
                 comments.extend(fallbacks[:5-len(comments)])
             
-            logger.info(f"Generated {len(comments)} comments using ChatGPT")
+            logger.info(f"Generated {len(comments)} comments using {model}")
             return comments[:5]
             
         except Exception as e:
-            logger.error(f"ChatGPT comment generation failed: {e}")
-            # Fallback to Groq
-            return await self._generate_comments_groq(tweet_text, job_context)
+            logger.error(f"{model} comment generation failed: {e}")
+            raise  # Re-raise to try next model
     
     async def _generate_comments_groq(self, tweet_text: str, job_context: str = "") -> List[str]:
         """Generate comments using Groq (fallback)"""
@@ -133,20 +152,19 @@ class AIValidator:
             prompt = self._build_comment_prompt(tweet_text, job_context)
             
             response = await self._make_groq_request(prompt)
+            logger.info(f"Raw Groq response: {response[:300]}...")
             
             # Parse the response to extract 5 comments
             comments = self._parse_comments_response(response)
             
+            if len(comments) < 3:
+                logger.warning(f"Groq only generated {len(comments)} comments, using fallbacks")
+                return self._get_fallback_comments()
+            
             if len(comments) < 5:
-                logger.warning(f"Only generated {len(comments)} comments, expected 5")
-                # Generate additional comments if needed
-                while len(comments) < 5:
-                    additional_prompt = self._build_additional_comment_prompt(tweet_text, comments)
-                    additional_response = await self._make_groq_request(additional_prompt)
-                    new_comments = self._parse_comments_response(additional_response)
-                    comments.extend(new_comments)
-                    if len(comments) >= 5:
-                        break
+                logger.info(f"Groq generated {len(comments)} comments, filling remaining with fallbacks")
+                fallbacks = self._get_fallback_comments()
+                comments.extend(fallbacks[:5-len(comments)])
             
             logger.info(f"Generated {len(comments)} comments using Groq")
             return comments[:5]  # Return exactly 5 comments
@@ -156,30 +174,33 @@ class AIValidator:
             return self._get_fallback_comments()
     
     async def generate_comment(self, prompt: str) -> Optional[str]:
-        """Generate a single realistic comment using AI (ChatGPT preferred, Groq fallback)"""
+        """Generate a single realistic comment using AI (GPT-4o > Groq)"""
         try:
-            if self.chatgpt_available:
-                try:
-                    response = self.chatgpt_client.chat.completions.create(
-                        messages=[
-                            {
-                                "role": "system", 
-                                "content": "You are a helpful assistant that generates natural, casual social media comments."
-                            },
-                            {"role": "user", "content": prompt}
-                        ],
-                        model=self.chatgpt_model,
-                        max_tokens=100,
-                        temperature=0.7
-                    )
-                    
-                    comment = response.choices[0].message.content.strip()
-                    comment = comment.strip('"\'`')
-                    logger.info("Generated single comment using ChatGPT")
-                    return comment
-                    
-                except Exception as e:
-                    logger.warning(f"ChatGPT single comment failed: {e}, falling back to Groq")
+            # Try GitHub Models first
+            if self.github_available:
+                for model in self.github_models:
+                    try:
+                        response = self.github_client.chat.completions.create(
+                            messages=[
+                                {
+                                    "role": "system", 
+                                    "content": "You are a helpful assistant that generates natural, casual social media comments."
+                                },
+                                {"role": "user", "content": prompt}
+                            ],
+                            model=model,
+                            max_tokens=100,
+                            temperature=0.8
+                        )
+                        
+                        comment = response.choices[0].message.content.strip()
+                        comment = comment.strip('"\'`')
+                        logger.info(f"Generated single comment using {model}")
+                        return comment
+                        
+                    except Exception as e:
+                        logger.warning(f"{model} single comment failed: {e}, trying next...")
+                        continue
             
             # Fallback to Groq
             response = await self._make_groq_request(prompt)
@@ -203,76 +224,57 @@ class AIValidator:
         """Build optimized prompt for ChatGPT comment generation"""
         clean_tweet = TextUtils.clean_text(tweet_text)
         
-        return f"""Generate 5 authentic crypto community comments following this STRICT pattern:
+        return f"""Generate 5 casual crypto comments for this tweet. Mix short (3-8 words) and medium (9-15 words).
 
-POSITION 1: MEDIUM comment (MUST be 9-15 words)
-POSITION 2: SHORT comment (MUST be 3-8 words)
-POSITION 3: MEDIUM comment (MUST be 9-15 words)
-POSITION 4: SHORT comment (MUST be 3-8 words)
-POSITION 5: MEDIUM comment (MUST be 9-15 words)
+Rules:
+- Sound like real excited crypto person, not bot
+- Use emoji in only 1-2 comments max
+- Lowercase casual style, use "ngl", "fr", "lowkey" naturally
+- Never say: "solid post", "great content", "nice work", "interesting"
+- Comments MUST relate to the actual tweet content
 
-EXAMPLES WITH WORD COUNTS:
+Tweet: {clean_tweet}
 
-SHORT COMMENTS (3-8 words exactly):
-- "game changer fr 🚀" ✅ PERFECT
-- "this looks promising 👀" ✅ PERFECT
-- "big moves happening here" ✅ PERFECT
-- "already set my reminder 🔔" ✅ PERFECT
-
-MEDIUM COMMENTS (9-15 words exactly):
-- "officials talking crypto? that's actually pretty interesting to see 🤔" ✅ PERFECT
-- "gonna read the docs first though, looks really promising" ✅ PERFECT
-- "yield farming space getting crowded but innovation is still good 💪" ✅ PERFECT
-
-CRITICAL RULES:
-- COUNT WORDS CAREFULLY before generating each comment
-- SHORT = exactly 3-8 words (no less, no more)
-- MEDIUM = exactly 9-15 words (no less, no more)
-- NO word count numbers in the actual comments
-- Use emojis in 4 out of 5 comments (80% emoji usage)
-- Place emojis naturally: at end, middle, or relevant context
-- Use crypto/finance relevant emojis: 🚀 💎 🔥 👀 💯 📈 💰 ⚡ 🌙 🎯 🔔 💪 🤔
-- Natural contractions and lowercase style
-
-Post to comment on: {clean_tweet}
-
-Generate 5 clean comments (include emojis in 4 out of 5):
-COMMENT 1: [MEDIUM comment - clean text only]
-COMMENT 2: [SHORT comment - clean text only] 
-COMMENT 3: [MEDIUM comment - clean text only]
-COMMENT 4: [SHORT comment - clean text only]
-COMMENT 5: [MEDIUM comment - clean text only]"""
+Output exactly 5 comments, numbered 1-5:
+1. 
+2. 
+3. 
+4. 
+5. """
     
     def _get_fallback_comments(self) -> List[str]:
-        """Return varied fallback comments with Medium-Short-Medium-Short-Medium pattern and 4/5 emojis"""
+        """Return varied fallback comments - minimal emojis"""
         fallback_sets = [
-            # Set 1: Following the new pattern with 4/5 emojis
             [
-                "this looks pretty interesting worth checking out 🚀",  # medium
-                "good stuff here 👀",       # short  
-                "definitely gonna keep an eye on this development 💪",    # medium
-                "solid content fr",  # short (no emoji)
-                "always appreciate updates like this from the community 💯"  # medium
+                "yo this is actually pretty huge for the ecosystem ngl",
+                "been waiting for this",
+                "finally some real progress lets see how it plays out",
+                "my portfolio likes this 🔥",
+                "everyone sleeping on this but not for long"
             ],
-            # Set 2: Different variety with 4/5 emojis
             [
-                "this could be something big happening in the space 📈",     # medium
-                "gonna check this 🔥",      # short
-                "appreciate the share and keeping us all updated",  # medium (no emoji)
-                "worth watching 🎯",  # short
-                "good to see progress like this honestly ngl 🌙"  # medium
+                "ngl this could be the move everyone been waiting for",
+                "lfg this is huge",
+                "lowkey excited to see where this goes",
+                "bookmarked already",
+                "the team really cooking with this one 🚀"
             ],
-            # Set 3: Natural crypto style with 4/5 emojis
             [
-                "interesting take on what's happening in the market 🤔",           # medium
-                "solid post",    # short (no emoji)
-                "this could definitely be something worth watching closely 👀",     # medium
-                "looks promising 💎",  # short
-                "always good when we see moves like this ⚡"  # medium
+                "bro this is exactly what the space needed right now",
+                "say less im in",
+                "been following this for a minute and its finally happening",
+                "this hittin different 💪",
+                "mad respect for actually delivering on the promises"
+            ],
+            [
+                "yooo the team actually came through with this one",
+                "we move",
+                "this the type of update i love to see keep building",
+                "bullish on this ngl",
+                "everyone gonna be talking about this soon fr 📈"
             ]
         ]
         
-        # Randomly select one set to avoid repetition
         import random
         return random.choice(fallback_sets)
     
@@ -423,54 +425,58 @@ Generate the comment:"""
             raise Exception("All available models failed or are decommissioned")
     
     def _parse_comments_response(self, response: str) -> List[str]:
-        """Parse comments from AI response and validate word count pattern"""
+        """Parse comments from AI response - flexible format handling"""
         comments = []
         lines = response.split('\n')
         
         for line in lines:
             line = line.strip()
+            if not line:
+                continue
             
-            # Look for comment patterns
-            if line.startswith('COMMENT'):
-                # Extract comment after the colon
+            comment = None
+            
+            # Pattern 1: "COMMENT 1: text" or "COMMENT: text"
+            if line.upper().startswith('COMMENT'):
                 if ':' in line:
                     comment = line.split(':', 1)[1].strip()
-                    if comment and len(comment) <= 280:  # Twitter character limit
-                        comments.append(comment)
-            elif line.startswith(('1.', '2.', '3.', '-')):
-                # Handle numbered or bulleted lists
-                comment = line.split('.', 1)[-1].split('-', 1)[-1].strip()
-                if comment and len(comment) <= 280:
+            
+            # Pattern 2: "1. text" or "1) text" or "1 text"
+            elif line[0].isdigit():
+                import re
+                match = re.match(r'^\d+[\.\)\s]\s*(.+)$', line)
+                if match:
+                    comment = match.group(1).strip()
+            
+            # Pattern 3: "- text" or "* text"
+            elif line.startswith(('-', '*', '•')):
+                comment = line[1:].strip()
+            
+            # Pattern 4: Just a plain line that looks like a comment (no special prefix)
+            elif len(line) > 5 and len(line) <= 280 and not line.startswith(('#', '@', 'http')):
+                # If it's a reasonable length and not a hashtag/mention/url, treat as comment
+                comment = line
+            
+            # Validate and add comment
+            if comment and len(comment) > 3 and len(comment) <= 280:
+                # Remove quotes if wrapped
+                comment = comment.strip('"\'`')
+                if comment and comment not in comments:
                     comments.append(comment)
         
         # Clean up comments
         cleaned_comments = []
         for comment in comments:
-            # Remove quotes if present
-            comment = comment.strip('"\'')
-            
-            # CRITICAL: Remove any word count validation text that might have leaked in
-            # Remove patterns like " (12 words)", " - 12 words", etc.
             import re
+            # Remove word count annotations
             comment = re.sub(r'\s*[\(\[\-]\s*\d+\s*words?\s*[\)\]]*\s*$', '', comment, flags=re.IGNORECASE)
-            comment = re.sub(r'\s*[\(\[\-]\s*word count:?\s*\d+\s*[\)\]]*\s*$', '', comment, flags=re.IGNORECASE)
-            comment = re.sub(r'\s*[\(\[\-]\s*\d+\s*w\s*[\)\]]*\s*$', '', comment, flags=re.IGNORECASE)
-            
-            # Remove any trailing validation text
-            comment = re.sub(r'\s*" \(\d+ words\)\s*$', '', comment)
             comment = re.sub(r'\s*\(\d+ words\)\s*$', '', comment)
-            
-            # Final cleanup
             comment = comment.strip()
             
             if comment and comment not in cleaned_comments:
                 cleaned_comments.append(comment)
         
-        # Validate and fix word count pattern if we have exactly 5 comments
-        if len(cleaned_comments) == 5:
-            cleaned_comments = self._validate_and_fix_pattern(cleaned_comments)
-        
-        return cleaned_comments
+        return cleaned_comments[:5]  # Return max 5
     
     def _validate_and_fix_pattern(self, comments: List[str]) -> List[str]:
         """Validate and fix the Medium-Short-Medium-Short-Medium pattern"""

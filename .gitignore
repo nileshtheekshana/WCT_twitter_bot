@@ -136,3 +136,4 @@ verify_fix.py
 # Backup and broken files
 *_backup.py
 *_broken.py
+.envWCT
