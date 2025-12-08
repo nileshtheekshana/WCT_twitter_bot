@@ -5,6 +5,17 @@
 echo "🤖 Twitter Shilling Bot - VPS Deployment"
 echo "========================================"
 
+# Use current directory as bot directory
+BOT_DIR="$(pwd)"
+echo "📁 Installing in current directory: $BOT_DIR"
+
+# Check if requirements.txt exists
+if [ ! -f "requirements.txt" ]; then
+    echo "❌ requirements.txt not found in $BOT_DIR"
+    echo "Please run this script from the bot directory!"
+    exit 1
+fi
+
 # Update system
 echo "📦 Updating system packages..."
 sudo apt update
@@ -18,26 +29,6 @@ sudo apt install -y python3 python3-pip python3-venv
 echo "📚 Installing system dependencies..."
 sudo apt install -y git curl wget screen tmux
 
-# Create bot directory
-echo "📁 Setting up bot directory..."
-BOT_DIR="/opt/twitter_shilling_bot"
-sudo mkdir -p $BOT_DIR
-sudo chown $USER:$USER $BOT_DIR
-
-# Clone or copy files - user should do this manually first
-echo "📋 Please ensure you have copied all bot files to $BOT_DIR"
-echo "   Including: main.py, src/, requirements.txt, .env"
-read -p "Press Enter when files are ready..."
-
-cd $BOT_DIR
-
-# Check if requirements.txt exists
-if [ ! -f "requirements.txt" ]; then
-    echo "❌ requirements.txt not found in $BOT_DIR"
-    echo "Please copy all bot files first!"
-    exit 1
-fi
-
 # Setup Python virtual environment
 echo "🔧 Setting up Python virtual environment..."
 python3 -m venv venv
@@ -48,8 +39,6 @@ echo "📦 Installing Python packages..."
 pip install --upgrade pip
 pip install -r requirements.txt
 
-# Install TgCrypto for faster Pyrogram (optional but recommended)
-pip install tgcrypto
 
 # Create logs directory
 mkdir -p logs
