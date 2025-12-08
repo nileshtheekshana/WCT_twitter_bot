@@ -137,3 +137,5 @@ verify_fix.py
 *_backup.py
 *_broken.py
 .envWCT
+
+.envtest
