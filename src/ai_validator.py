@@ -48,29 +48,66 @@ class AIValidator:
         if self.github_available:
             logger.info(f"GitHub Models available: {', '.join(self.github_models)}")
     
+    def _has_valid_task_format(self, message_text: str) -> tuple[bool, str, str]:
+        """
+        Check if message has valid task format with Round number and Task number
+        Format: R[number] - REQUIRED TASK NUMBER [ number ]
+        Returns: (has_format, round_number, task_number)
+        """
+        import re
+        # Pattern to match: R139 - REQUIRED TASK NUMBER [ 24 ]
+        pattern = r'R(\d+)\s*[-–]\s*(?:REQUIRED\s+)?TASK\s+(?:NUMBER\s*)?\[\s*(\d+)\s*\]'
+        match = re.search(pattern, message_text, re.IGNORECASE)
+        
+        if match:
+            round_num = match.group(1)
+            task_num = match.group(2)
+            return True, round_num, task_num
+        
+        return False, "", ""
+    
+    def _has_twitter_url(self, message_text: str) -> bool:
+        """Check if message contains a Twitter/X URL"""
+        import re
+        pattern = r'https?://(?:www\.)?(?:twitter\.com|x\.com)/\w+/status/\d+'
+        return bool(re.search(pattern, message_text, re.IGNORECASE))
+    
     async def is_valid_twitter_job(self, message_text: str) -> tuple[bool, str]:
         """
         Validate if a message is a valid Twitter job
+        Must have: Round number, Task number, and Twitter URL
         Returns: (is_valid, reason)
         """
         try:
-            prompt = self._build_validation_prompt(message_text)
+            # STEP 1: Check for proper task format (Round + Task number)
+            has_format, round_num, task_num = self._has_valid_task_format(message_text)
             
-            response = await self._make_groq_request(prompt)
+            if not has_format:
+                logger.info("Job rejected: Missing proper task format (R[num] - TASK NUMBER [num])")
+                return False, "Missing task format - needs Round number and Task number"
             
-            # Parse response
-            result = response.strip().lower()
+            # STEP 2: Check for Twitter/X URL
+            if not self._has_twitter_url(message_text):
+                logger.info("Job rejected: No Twitter/X URL found")
+                return False, "No Twitter URL found in message"
             
-            if result.startswith("valid"):
-                return True, "Valid Twitter job detected"
-            elif result.startswith("invalid"):
-                reason = result.replace("invalid", "").strip(" :-")
-                return False, f"Invalid job: {reason}"
-            else:
-                # Fallback parsing
-                is_valid = "valid" in result and "twitter" in result
-                reason = "AI validation uncertain" if not is_valid else "Valid Twitter job"
-                return is_valid, reason
+            # STEP 3: Check it's not just "like and RT" (no comment needed)
+            message_lower = message_text.lower()
+            
+            # Keywords that indicate comments are needed
+            comment_keywords = ['comment', 'reply', 'creative', 'response', 'impression']
+            needs_comment = any(keyword in message_lower for keyword in comment_keywords)
+            
+            # Keywords that indicate ONLY like/RT (no comment)
+            like_only_keywords = ['like and rt only', 'like & rt only', 'only like and rt', 'like and retweet only']
+            is_like_only = any(keyword in message_lower for keyword in like_only_keywords)
+            
+            if is_like_only and not needs_comment:
+                logger.info(f"Job R{round_num} Task {task_num} rejected: Like/RT only task (no comment needed)")
+                return False, f"R{round_num} Task {task_num} - Like/RT only (no comment needed)"
+            
+            logger.info(f"Valid job format detected: R{round_num} - Task {task_num}")
+            return True, f"Valid Twitter job: R{round_num} - Task {task_num}"
                 
         except Exception as e:
             logger.error(f"Error validating Twitter job: {e}")
@@ -224,28 +261,27 @@ class AIValidator:
         """Build optimized prompt for ChatGPT comment generation"""
         clean_tweet = TextUtils.clean_text(tweet_text)
         
-        return f"""Generate 5 unique Twitter replies for this crypto tweet. Be a real person, not a bot.
+        return f"""Generate 5 Twitter replies for this crypto tweet. Be a real person, not a bot.
 
-STRICT RULES:
-- Use slang like "ngl", "fr", "tbh" VERY RARELY (max 1 comment out of 5, not every batch)
+LENGTH MIX (IMPORTANT):
+- 2 comments: SHORT (3-6 words) - punchy reactions
+- 3 comments: MEDIUM (7-12 words) - more substance but still casual
+
+STYLE RULES:
+- Use slang like "ngl", "fr", "tbh" RARELY (max 1 out of 5)
 - NEVER use "lowkey" - it's overused
-- NEVER use hyphens/dashes in comments
-- Mix lengths: 2 short (4-7 words), 3 medium (8-14 words)
-- Max 2 comments can have emoji (use 🚀 💰 🔥 📈 sparingly)
-- Sound genuinely interested, not generic
-- Each comment MUST reference something specific from the tweet
-- Use natural speech: "this is", "wait", "so", "damn", "yo", "bro", "lets go", "wild", "crazy"
-- Vary the energy: curious, excited, skeptical, impressed, funny
+- NEVER use hyphens/dashes
+- EMOJI: Only 1-2 comments max can have emoji (most should have NONE)
+- Start most comments with LOWERCASE (looks more casual/human)
+- Each comment references the tweet
+- Natural speech: "yo", "bro", "damn", "wait", "wild", "sick", "lets go"
+- Mix vibes: curious, hyped, impressed, funny
 
-BANNED PHRASES (never use):
-- "solid post", "great content", "nice work", "interesting"  
-- "let's gooo" (with multiple o's)
-- "lowkey" - NEVER use this word
-- Any generic hype that could fit any tweet
+BANNED: "solid", "great content", "nice", "interesting", "lowkey", "let's gooo"
 
 Tweet: {clean_tweet}
 
-Write 5 comments that a real crypto person would post. Each must feel different:
+Write 5 comments (2 short, 3 medium):
 1. 
 2. 
 3. 
@@ -253,35 +289,35 @@ Write 5 comments that a real crypto person would post. Each must feel different:
 5. """
     
     def _get_fallback_comments(self) -> List[str]:
-        """Return varied fallback comments - no AI markers"""
+        """Return varied fallback comments - mix of short and medium, few emojis, lowercase starts"""
         fallback_sets = [
             [
-                "yo this is actually pretty huge for the ecosystem",
-                "been waiting for this one",
-                "finally some real progress here",
-                "my portfolio likes this 🔥",
-                "everyone sleeping on this but not for long"
+                "yo this is huge",
+                "been waiting for something like this to drop",
+                "finally",
+                "my portfolio definitely likes this one 🔥",
+                "not sleeping on this opportunity"
             ],
             [
-                "this could be the move everyone been waiting for",
-                "lfg this is huge",
-                "excited to see where this goes",
-                "bookmarked already",
-                "the team really cooking with this one 🚀"
+                "the move we needed",
+                "this is exactly what the community been asking for",
+                "bookmarked",
+                "team really coming through with this one",
+                "bullish on this 🚀"
             ],
             [
-                "bro this is exactly what the space needed right now",
+                "bro this is it",
+                "cant believe they actually pulled this off",
                 "say less im in",
-                "been following this for a minute and its finally happening",
-                "this hittin different 💪",
-                "mad respect for actually delivering on the promises"
+                "this hittin different than usual",
+                "mad respect 💪"
             ],
             [
-                "yooo the team actually came through with this one",
+                "yooo they delivered",
+                "this could be bigger than people realize",
                 "we move",
-                "this the type of update i love to see",
-                "bullish on this",
-                "everyone gonna be talking about this soon 📈"
+                "love to see them keep pushing forward",
+                "bullish 📈"
             ]
         ]
         
@@ -320,35 +356,34 @@ Response:"""
         """Build prompt for generating comments (Groq fallback)"""
         clean_tweet = TextUtils.clean_text(tweet_text)
         
-        return f"""Generate 5 authentic Twitter replies for this crypto tweet. Sound like a real person scrolling Twitter.
+        return f"""Generate 5 Twitter replies for this crypto tweet. Mix of short and medium length.
 
-STRICT LENGTH PATTERN:
-- Comment 1: MEDIUM (8-14 words)
-- Comment 2: SHORT (4-7 words)  
-- Comment 3: MEDIUM (8-14 words)
-- Comment 4: SHORT (4-7 words)
-- Comment 5: MEDIUM (8-14 words)
+LENGTH PATTERN:
+- Comment 1: SHORT (3-6 words)
+- Comment 2: MEDIUM (7-12 words)  
+- Comment 3: SHORT (3-6 words)
+- Comment 4: MEDIUM (7-12 words)
+- Comment 5: MEDIUM (7-12 words)
 
 Tweet: {clean_tweet}
 
-CRITICAL RULES:
-- Use "ngl", "fr", "tbh" VERY RARELY (max 1 comment out of 5, not every batch)
-- NEVER use "lowkey" - it's overused by AI
-- NEVER use hyphens or dashes
-- Max 2 comments with emoji (🚀 💰 🔥 📈)
-- Each comment must reference the actual tweet content
-- Use casual language: "yo", "bro", "damn", "wait", "so", "wild", "crazy", "lets go"
-- Mix vibes: excited, curious, impressed, funny, skeptical
-- Sound human, not like marketing copy
+RULES:
+- Use "ngl", "fr", "tbh" RARELY (max 1 out of 5)
+- NEVER use "lowkey" or hyphens
+- EMOJI: Only 1-2 comments can have emoji (3-4 should have NO emoji)
+- Start most comments with lowercase (not every word capitalized)
+- Reference the tweet content
+- Casual: "yo", "bro", "damn", "wait", "wild", "sick", "lets go"
+- Mix vibes: hyped, curious, impressed, funny
 
-BANNED: "solid", "great content", "nice", "interesting", "let's gooo", "lowkey"
+BANNED: "solid", "great content", "nice", "interesting", "lowkey"
 
-Output format (clean text only):
-COMMENT 1: [medium comment]
-COMMENT 2: [short comment]
-COMMENT 3: [medium comment] 
-COMMENT 4: [short comment]
-COMMENT 5: [medium comment]"""
+Output (clean text only):
+COMMENT 1: [short]
+COMMENT 2: [medium]
+COMMENT 3: [short] 
+COMMENT 4: [medium]
+COMMENT 5: [medium]"""
     
     def _build_additional_comment_prompt(self, tweet_text: str, existing_comments: List[str]) -> str:
         """Build prompt for generating additional comments"""
