@@ -224,18 +224,28 @@ class AIValidator:
         """Build optimized prompt for ChatGPT comment generation"""
         clean_tweet = TextUtils.clean_text(tweet_text)
         
-        return f"""Generate 5 casual crypto comments for this tweet. Mix short (3-8 words) and medium (9-15 words).
+        return f"""Generate 5 unique Twitter replies for this crypto tweet. Be a real person, not a bot.
 
-Rules:
-- Sound like real excited crypto person, not bot
-- Use emoji in only 1-2 comments max
-- Lowercase casual style, use "ngl", "fr", "lowkey" naturally
-- Never say: "solid post", "great content", "nice work", "interesting"
-- Comments MUST relate to the actual tweet content
+STRICT RULES:
+- Use slang like "ngl", "fr", "tbh" VERY RARELY (max 1 comment out of 5, not every batch)
+- NEVER use "lowkey" - it's overused
+- NEVER use hyphens/dashes in comments
+- Mix lengths: 2 short (4-7 words), 3 medium (8-14 words)
+- Max 2 comments can have emoji (use 🚀 💰 🔥 📈 sparingly)
+- Sound genuinely interested, not generic
+- Each comment MUST reference something specific from the tweet
+- Use natural speech: "this is", "wait", "so", "damn", "yo", "bro", "lets go", "wild", "crazy"
+- Vary the energy: curious, excited, skeptical, impressed, funny
+
+BANNED PHRASES (never use):
+- "solid post", "great content", "nice work", "interesting"  
+- "let's gooo" (with multiple o's)
+- "lowkey" - NEVER use this word
+- Any generic hype that could fit any tweet
 
 Tweet: {clean_tweet}
 
-Output exactly 5 comments, numbered 1-5:
+Write 5 comments that a real crypto person would post. Each must feel different:
 1. 
 2. 
 3. 
@@ -243,19 +253,19 @@ Output exactly 5 comments, numbered 1-5:
 5. """
     
     def _get_fallback_comments(self) -> List[str]:
-        """Return varied fallback comments - minimal emojis"""
+        """Return varied fallback comments - no AI markers"""
         fallback_sets = [
             [
-                "yo this is actually pretty huge for the ecosystem ngl",
-                "been waiting for this",
-                "finally some real progress lets see how it plays out",
+                "yo this is actually pretty huge for the ecosystem",
+                "been waiting for this one",
+                "finally some real progress here",
                 "my portfolio likes this 🔥",
                 "everyone sleeping on this but not for long"
             ],
             [
-                "ngl this could be the move everyone been waiting for",
+                "this could be the move everyone been waiting for",
                 "lfg this is huge",
-                "lowkey excited to see where this goes",
+                "excited to see where this goes",
                 "bookmarked already",
                 "the team really cooking with this one 🚀"
             ],
@@ -269,9 +279,9 @@ Output exactly 5 comments, numbered 1-5:
             [
                 "yooo the team actually came through with this one",
                 "we move",
-                "this the type of update i love to see keep building",
-                "bullish on this ngl",
-                "everyone gonna be talking about this soon fr 📈"
+                "this the type of update i love to see",
+                "bullish on this",
+                "everyone gonna be talking about this soon 📈"
             ]
         ]
         
@@ -310,40 +320,35 @@ Response:"""
         """Build prompt for generating comments (Groq fallback)"""
         clean_tweet = TextUtils.clean_text(tweet_text)
         
-        return f"""Generate 5 authentic human-like crypto community comments following STRICT word count pattern:
+        return f"""Generate 5 authentic Twitter replies for this crypto tweet. Sound like a real person scrolling Twitter.
 
-POSITION 1: MEDIUM comment (MUST be exactly 9-15 words)
-POSITION 2: SHORT comment (MUST be exactly 3-8 words)
-POSITION 3: MEDIUM comment (MUST be exactly 9-15 words)
-POSITION 4: SHORT comment (MUST be exactly 3-8 words)
-POSITION 5: MEDIUM comment (MUST be exactly 9-15 words)
+STRICT LENGTH PATTERN:
+- Comment 1: MEDIUM (8-14 words)
+- Comment 2: SHORT (4-7 words)  
+- Comment 3: MEDIUM (8-14 words)
+- Comment 4: SHORT (4-7 words)
+- Comment 5: MEDIUM (8-14 words)
 
-Tweet content: {clean_tweet}
+Tweet: {clean_tweet}
 
-CRITICAL WORD COUNT RULES:
-- SHORT = 3-8 words (never less than 3, never more than 8)
-- MEDIUM = 9-15 words (never less than 9, never more than 15)
-- Count every single word before generating
-- DO NOT include word counts in the actual comments
-- Just provide clean comment text
+CRITICAL RULES:
+- Use "ngl", "fr", "tbh" VERY RARELY (max 1 comment out of 5, not every batch)
+- NEVER use "lowkey" - it's overused by AI
+- NEVER use hyphens or dashes
+- Max 2 comments with emoji (🚀 💰 🔥 📈)
+- Each comment must reference the actual tweet content
+- Use casual language: "yo", "bro", "damn", "wait", "so", "wild", "crazy", "lets go"
+- Mix vibes: excited, curious, impressed, funny, skeptical
+- Sound human, not like marketing copy
 
-REQUIREMENTS: 
-- Sound like actual crypto enthusiasts with genuine reactions
-- COUNT WORDS CAREFULLY - this is critical
-- Use emojis in 4 out of 5 comments (80% emoji usage)
-- Crypto/finance emojis: 🚀 💎 🔥 👀 💯 📈 💰 ⚡ 🌙 🎯 🔔 💪 🤔
-- Place emojis naturally in context
-- Casual grammar: lowercase, contractions (gonna, can't, tbh)
-- Varied tones: excited, curious, neutral
-- Crypto slang sparingly: "fr", "ngl", "imo" in max 1 comment
-- Make each comment unique and human
+BANNED: "solid", "great content", "nice", "interesting", "let's gooo", "lowkey"
 
-Format - provide ONLY clean comment text:
-COMMENT 1: [medium comment text only]
-COMMENT 2: [short comment text only]
-COMMENT 3: [medium comment text only] 
-COMMENT 4: [short comment text only]
-COMMENT 5: [medium comment text only]"""
+Output format (clean text only):
+COMMENT 1: [medium comment]
+COMMENT 2: [short comment]
+COMMENT 3: [medium comment] 
+COMMENT 4: [short comment]
+COMMENT 5: [medium comment]"""
     
     def _build_additional_comment_prompt(self, tweet_text: str, existing_comments: List[str]) -> str:
         """Build prompt for generating additional comments"""
@@ -351,26 +356,25 @@ COMMENT 5: [medium comment text only]"""
         existing_text = "\n".join([f"- {comment}" for comment in existing_comments])
         
         return f"""
-Generate 1 more authentic human-like Twitter reply for this tweet. Make it completely different from existing comments.
+Generate 1 more authentic Twitter reply for this tweet. Make it completely different from existing comments.
 
-Tweet content:
-{clean_tweet}
+Tweet: {clean_tweet}
 
 Existing comments (make yours unique):
 {existing_text}
 
-Requirements:
-1. Must be completely different from existing comments in tone and content
-2. Use natural human speech patterns and casual grammar
-3. Vary the length: could be short (3-6 words) or medium (10-20 words)
-4. Only use emoji if it feels natural (30% chance)
-5. Sound like a real person with genuine reaction
-6. Use lowercase, contractions, natural flow
-7. Could be question, observation, personal reaction, or related thought
+Rules:
+- Must be completely different from existing comments
+- Use "ngl", "fr", "tbh" SPARINGLY (only if existing comments don't have them)
+- NEVER use "lowkey" or hyphens
+- Vary length: short (4-7 words) or medium (8-14 words)
+- Only use emoji if natural (30% chance)
+- Sound like a real person, casual grammar
+- Reference something specific from the tweet
 
 Format: COMMENT: [your unique comment]
 
-Generate the comment:"""
+Generate:"""
     
     async def _make_groq_request(self, prompt: str) -> str:
         """Make request to Groq API with retry logic and model fallback"""
